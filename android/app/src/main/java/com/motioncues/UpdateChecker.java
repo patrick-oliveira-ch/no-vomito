@@ -1,79 +1,96 @@
 package com.motioncues;
 
-import android.app.DownloadManager;
-import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.pm.PackageInfo;
-import android.net.Uri;
-import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.widget.Toast;
 
-import org.json.JSONObject;
-
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
-
-public class UpdateChecker {
-    private static final String SERVER_URL = "http://192.168.1.153:7777";
+/**
+ * Push-based OTA updater using long-poll.
+ * App connects to /api/wait-update — server holds connection
+ * until a new build is pushed, then responds immediately.
+ * NO inner classes — d8 bug workaround.
+ */
+public class UpdateChecker implements Runnable {
+    static final String SERVER_URL = "http://192.168.1.153:7777";
     private final Context context;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private boolean running = false;
+    int localVersion = -1;
+    volatile boolean updateAvailable = false;
+
+    Context getContext() {
+        return context;
+    }
 
     public UpdateChecker(Context ctx) {
         this.context = ctx;
+        try {
+            PackageInfo pi = ctx.getPackageManager()
+                .getPackageInfo(ctx.getPackageName(), 0);
+            localVersion = (int) pi.getLongVersionCode();
+        } catch (Exception e) {
+            localVersion = 0;
+        }
     }
 
-    public void checkForUpdate() {
-        new Thread(() -> {
-            try {
-                URL url = new URL(SERVER_URL + "/api/version");
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(5000);
-
-                BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(conn.getInputStream()));
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = reader.readLine()) != null) sb.append(line);
-                reader.close();
-
-                JSONObject json = new JSONObject(sb.toString());
-                int remoteVersion = json.getInt("versionCode");
-
-                PackageInfo pi = context.getPackageManager()
-                    .getPackageInfo(context.getPackageName(), 0);
-                int localVersion = (int) pi.getLongVersionCode();
-
-                if (remoteVersion > localVersion) {
-                    downloadAndInstall(json.getString("filename"));
-                }
-            } catch (Exception e) {
-                // Server unreachable — silently ignore
-            }
-        }).start();
+    public void startChecking() {
+        running = true;
+        // Start long-poll connection in background
+        startLongPoll();
     }
 
-    private void downloadAndInstall(String filename) {
-        DownloadManager dm = (DownloadManager) context.getSystemService(
-            Context.DOWNLOAD_SERVICE);
-        Uri uri = Uri.parse(SERVER_URL + "/api/download");
+    public void stopChecking() {
+        running = false;
+        handler.removeCallbacks(this);
+    }
 
-        DownloadManager.Request request = new DownloadManager.Request(uri);
-        request.setTitle("Motion Cues Update");
-        request.setDescription("Downloading update...");
-        request.setDestinationInExternalPublicDir(
-            Environment.DIRECTORY_DOWNLOADS, "motion-cues-update.apk");
-        request.setNotificationVisibility(
-            DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-        request.setMimeType("application/vnd.android.package-archive");
+    /** Manual check — fetch /api/version and compare */
+    public void checkNow() {
+        ManualCheckThread t = new ManualCheckThread(this);
+        t.setDaemon(true);
+        t.start();
+    }
 
-        dm.enqueue(request);
+    private void startLongPoll() {
+        if (!running) return;
+        BackgroundChecker bg = new BackgroundChecker(this);
+        bg.setDaemon(true);
+        bg.start();
+    }
 
-        // The user taps the notification to install
-        Toast.makeText(context, "Mise à jour en téléchargement...",
+    // Called from BackgroundChecker when server responds with update
+    void onUpdateFound() {
+        updateAvailable = true;
+        handler.post(this);
+    }
+
+    // Called from BackgroundChecker when connection times out or fails
+    void onConnectionEnded() {
+        if (running) {
+            // Reconnect after 2 seconds
+            handler.postDelayed(new ReconnectTask(this), 2000);
+        }
+    }
+
+    @Override
+    public void run() {
+        // Called on main thread to trigger download
+        if (updateAvailable) {
+            updateAvailable = false;
+            running = false;
+            doDownload();
+        }
+    }
+
+    private void doDownload() {
+        Toast.makeText(context,
+            "Mise à jour dispo ! Téléchargement...",
             Toast.LENGTH_LONG).show();
+
+        DownloadInstallThread t = new DownloadInstallThread(context);
+        t.setDaemon(true);
+        t.start();
     }
 }

@@ -29,7 +29,23 @@ APK_DIR="$BUILD_DIR/apk"
 
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
 
-echo "=== Motion Cues APK Build ==="
+# Auto-increment versionCode
+VERSION_FILE="$PROJECT_DIR/.version_code"
+if [ -f "$VERSION_FILE" ]; then
+    VERSION_CODE=$(cat "$VERSION_FILE")
+    VERSION_CODE=$((VERSION_CODE + 1))
+else
+    VERSION_CODE=2
+fi
+echo "$VERSION_CODE" > "$VERSION_FILE"
+
+# Compute version name from code
+VERSION_MAJOR=$((VERSION_CODE / 100))
+VERSION_MINOR=$(( (VERSION_CODE % 100) / 10 ))
+VERSION_PATCH=$((VERSION_CODE % 10))
+VERSION_NAME="${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}"
+
+echo "=== No Vomito APK Build (v${VERSION_NAME} code=${VERSION_CODE}) ==="
 echo ""
 
 # Clean
@@ -56,6 +72,10 @@ $AAPT2 link \
     -I "$ANDROID_JAR" \
     --manifest "$MANIFEST" \
     --java "$GEN_DIR" \
+    --min-sdk-version 29 \
+    --target-sdk-version 35 \
+    --version-code $VERSION_CODE \
+    --version-name "$VERSION_NAME" \
     -o "$APK_DIR/app-unaligned.apk" \
     --auto-add-overlay \
     $FLAT_LIST
@@ -121,8 +141,6 @@ mkdir -p "$PROJECT_DIR/server/releases"
 cp "$APK_DIR/motion-cues.apk" "$PROJECT_DIR/server/releases/"
 
 # Update version manifest
-VERSION_CODE=$(grep -oP 'android:versionCode="\K[^"]+' "$MANIFEST" 2>/dev/null || echo "1")
-VERSION_NAME=$(grep -oP 'android:versionName="\K[^"]+' "$MANIFEST" 2>/dev/null || echo "1.0.0")
 cat > "$PROJECT_DIR/server/releases/latest.json" << EOFJ
 {"versionCode": $VERSION_CODE, "versionName": "$VERSION_NAME", "filename": "motion-cues.apk"}
 EOFJ
@@ -132,3 +150,9 @@ echo ""
 echo "=== BUILD SUCCESS ==="
 echo "APK: $APK_DIR/motion-cues.apk ($APK_SIZE)"
 echo "Also copied to: server/releases/motion-cues.apk"
+
+# Push update to connected clients
+echo ""
+echo "Pushing update to clients..."
+NOTIFY_RESULT=$(curl -s -X POST http://localhost:7777/api/notify 2>/dev/null || echo '{"error":"server not running"}')
+echo "  $NOTIFY_RESULT"

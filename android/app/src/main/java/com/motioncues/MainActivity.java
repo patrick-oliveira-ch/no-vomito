@@ -11,26 +11,37 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.view.View;
 import android.widget.Button;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
-public class MainActivity extends Activity {
+public class MainActivity extends Activity implements SeekBar.OnSeekBarChangeListener {
     private static final int PERMISSION_REQUEST_CODE = 100;
     private static final int OVERLAY_REQUEST_CODE = 101;
 
     private Button toggleButton;
     private TextView statusText;
+    private TextView sensitivityLabel;
+    private TextView scrollSpeedLabel;
+    private TextView alphaLabel;
+    private TextView gridDensityLabel;
+    private TextView minSpeedLabel;
+    private SeekBar sensitivitySeek;
+    private SeekBar scrollSpeedSeek;
+    private SeekBar alphaSeek;
+    private SeekBar gridDensitySeek;
+    private SeekBar minSpeedSeek;
     private SharedPreferences prefs;
     private boolean serviceRunning = false;
+    private UpdateChecker updateChecker;
 
     private final int[] colorIds = {
-        R.id.colorGray, R.id.colorWhite, R.id.colorBlue,
+        R.id.colorBlack, R.id.colorGray, R.id.colorWhite, R.id.colorBlue,
         R.id.colorGreen, R.id.colorRed, R.id.colorOrange
     };
     private final int[] colorValues = {
-        0xFF666666, 0xFFFFFFFF, 0xFF2196F3,
+        0xFF000000, 0xFF666666, 0xFFFFFFFF, 0xFF2196F3,
         0xFF4CAF50, 0xFFF44336, 0xFFFF9800
     };
 
@@ -42,6 +53,16 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences("motion_cues", MODE_PRIVATE);
         toggleButton = findViewById(R.id.toggleButton);
         statusText = findViewById(R.id.statusText);
+        sensitivityLabel = findViewById(R.id.sensitivityLabel);
+        sensitivitySeek = findViewById(R.id.sensitivitySeek);
+        scrollSpeedLabel = findViewById(R.id.scrollSpeedLabel);
+        scrollSpeedSeek = findViewById(R.id.scrollSpeedSeek);
+        alphaLabel = findViewById(R.id.alphaLabel);
+        alphaSeek = findViewById(R.id.alphaSeek);
+        gridDensityLabel = findViewById(R.id.gridDensityLabel);
+        gridDensitySeek = findViewById(R.id.gridDensitySeek);
+        minSpeedLabel = findViewById(R.id.minSpeedLabel);
+        minSpeedSeek = findViewById(R.id.minSpeedSeek);
 
         // Version
         try {
@@ -49,7 +70,7 @@ public class MainActivity extends Activity {
             ((TextView) findViewById(R.id.versionText)).setText("v" + pi.versionName);
         } catch (PackageManager.NameNotFoundException e) {}
 
-        // Toggle
+        // Toggle start/stop
         toggleButton.setOnClickListener(v -> {
             if (serviceRunning) {
                 stopOverlayService();
@@ -57,6 +78,37 @@ public class MainActivity extends Activity {
                 startOverlayService();
             }
         });
+
+        // Sensitivity slider
+        int savedSens = (int)(prefs.getFloat("sensitivity", 0.5f) * 100);
+        sensitivitySeek.setProgress(savedSens);
+        sensitivityLabel.setText(savedSens + "%");
+        sensitivitySeek.setOnSeekBarChangeListener(this);
+
+        // Scroll speed slider
+        int savedSpeed = (int)(prefs.getFloat("scroll_speed", 0.3f) * 100);
+        scrollSpeedSeek.setProgress(savedSpeed);
+        scrollSpeedLabel.setText(savedSpeed + "%");
+        scrollSpeedSeek.setOnSeekBarChangeListener(this);
+
+        // Grid density slider
+        int savedDensity = prefs.getInt("grid_density", 5);
+        gridDensitySeek.setProgress(savedDensity);
+        int totalDots = (3 + savedDensity / 2) * (6 + savedDensity);
+        gridDensityLabel.setText(totalDots + " points");
+        gridDensitySeek.setOnSeekBarChangeListener(this);
+
+        // Min speed slider
+        int savedMinSpeed = (int) prefs.getFloat("min_speed", 0f);
+        minSpeedSeek.setProgress(savedMinSpeed);
+        minSpeedLabel.setText(savedMinSpeed == 0 ? "Désactivé" : savedMinSpeed + " km/h");
+        minSpeedSeek.setOnSeekBarChangeListener(this);
+
+        // Opacity slider
+        int savedAlpha = (int)(prefs.getFloat("dot_alpha", 0.45f) * 100);
+        alphaSeek.setProgress(savedAlpha);
+        alphaLabel.setText(savedAlpha + "%");
+        alphaSeek.setOnSeekBarChangeListener(this);
 
         // Color picker
         for (int i = 0; i < colorIds.length; i++) {
@@ -74,8 +126,14 @@ public class MainActivity extends Activity {
 
         updateUI();
 
-        // Check for updates
-        new UpdateChecker(this).checkForUpdate();
+        // Update checker
+        updateChecker = new UpdateChecker(this);
+        updateChecker.startChecking();
+
+        findViewById(R.id.updateButton).setOnClickListener(v -> {
+            Toast.makeText(this, "Vérification...", Toast.LENGTH_SHORT).show();
+            updateChecker.checkNow();
+        });
     }
 
     @Override
@@ -86,15 +144,12 @@ public class MainActivity extends Activity {
     }
 
     private void startOverlayService() {
-        // Check overlay permission
         if (!Settings.canDrawOverlays(this)) {
             Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:" + getPackageName()));
             startActivityForResult(intent, OVERLAY_REQUEST_CODE);
             return;
         }
-
-        // Check location permission
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{
@@ -103,8 +158,6 @@ public class MainActivity extends Activity {
             }, PERMISSION_REQUEST_CODE);
             return;
         }
-
-        // Check notification permission (Android 13+)
         if (Build.VERSION.SDK_INT >= 33 &&
                 checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                     != PackageManager.PERMISSION_GRANTED) {
@@ -115,8 +168,18 @@ public class MainActivity extends Activity {
         }
 
         Intent intent = new Intent(this, OverlayService.class);
-        int color = prefs.getInt("dot_color", 0xFF333333);
-        intent.putExtra(OverlayService.EXTRA_COLOR, color);
+        intent.putExtra(OverlayService.EXTRA_COLOR,
+            prefs.getInt("dot_color", 0xFF000000));
+        intent.putExtra(OverlayService.EXTRA_SENSITIVITY,
+            prefs.getFloat("sensitivity", 0.5f));
+        intent.putExtra(OverlayService.EXTRA_SCROLL_SPEED,
+            prefs.getFloat("scroll_speed", 0.3f));
+        intent.putExtra(OverlayService.EXTRA_ALPHA,
+            prefs.getFloat("dot_alpha", 0.45f));
+        intent.putExtra(OverlayService.EXTRA_GRID_DENSITY,
+            prefs.getInt("grid_density", 5));
+        intent.putExtra(OverlayService.EXTRA_MIN_SPEED,
+            prefs.getFloat("min_speed", 0f));
         startForegroundService(intent);
         serviceRunning = true;
         updateUI();
@@ -134,7 +197,7 @@ public class MainActivity extends Activity {
         if (serviceRunning) {
             toggleButton.setText("Arrêter");
             toggleButton.setBackgroundColor(0xFFF44336);
-            statusText.setText("Actif — en attente de mouvement véhicule");
+            statusText.setText("Actif");
         } else {
             toggleButton.setText("Démarrer");
             toggleButton.setBackgroundColor(0xFF4CAF50);
@@ -165,9 +228,66 @@ public class MainActivity extends Activity {
             if (Settings.canDrawOverlays(this)) {
                 startOverlayService();
             } else {
-                Toast.makeText(this,
-                    "Permission overlay requise", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "Permission overlay requise", Toast.LENGTH_LONG).show();
             }
         }
     }
+
+    // SeekBar.OnSeekBarChangeListener
+    @Override
+    public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
+        if (sb.getId() == R.id.sensitivitySeek) {
+            sensitivityLabel.setText(progress + "%");
+            float val = progress / 100f;
+            prefs.edit().putFloat("sensitivity", val).apply();
+            if (serviceRunning) {
+                Intent intent = new Intent(this, OverlayService.class);
+                intent.putExtra(OverlayService.EXTRA_SENSITIVITY, val);
+                startService(intent);
+            }
+        } else if (sb.getId() == R.id.scrollSpeedSeek) {
+            scrollSpeedLabel.setText(progress + "%");
+            float val = progress / 100f;
+            prefs.edit().putFloat("scroll_speed", val).apply();
+            if (serviceRunning) {
+                Intent intent = new Intent(this, OverlayService.class);
+                intent.putExtra(OverlayService.EXTRA_SCROLL_SPEED, val);
+                startService(intent);
+            }
+        } else if (sb.getId() == R.id.gridDensitySeek) {
+            int cols = 3 + progress / 2;
+            int rows = 6 + progress;
+            gridDensityLabel.setText((cols * rows) + " points");
+            prefs.edit().putInt("grid_density", progress).apply();
+            if (serviceRunning) {
+                Intent intent = new Intent(this, OverlayService.class);
+                intent.putExtra(OverlayService.EXTRA_GRID_DENSITY, progress);
+                startService(intent);
+            }
+        } else if (sb.getId() == R.id.minSpeedSeek) {
+            minSpeedLabel.setText(progress == 0 ? "Désactivé" : progress + " km/h");
+            float val = (float) progress;
+            prefs.edit().putFloat("min_speed", val).apply();
+            if (serviceRunning) {
+                Intent intent = new Intent(this, OverlayService.class);
+                intent.putExtra(OverlayService.EXTRA_MIN_SPEED, val);
+                startService(intent);
+            }
+        } else if (sb.getId() == R.id.alphaSeek) {
+            alphaLabel.setText(progress + "%");
+            float val = progress / 100f;
+            prefs.edit().putFloat("dot_alpha", val).apply();
+            if (serviceRunning) {
+                Intent intent = new Intent(this, OverlayService.class);
+                intent.putExtra(OverlayService.EXTRA_ALPHA, val);
+                startService(intent);
+            }
+        }
+    }
+
+    @Override
+    public void onStartTrackingTouch(SeekBar sb) {}
+
+    @Override
+    public void onStopTrackingTouch(SeekBar sb) {}
 }

@@ -10,6 +10,7 @@ import android.os.Bundle;
 public class VehicleDetector implements LocationListener {
     public interface VehicleListener {
         void onVehicleStateChanged(boolean inVehicle, float speedKmh);
+        void onGpsLocation(Location loc);
     }
 
     private final LocationManager locationManager;
@@ -26,7 +27,7 @@ public class VehicleDetector implements LocationListener {
     public void start(VehicleListener listener) {
         this.listener = listener;
         locationManager.requestLocationUpdates(
-            LocationManager.GPS_PROVIDER, 1000, 0, this);
+            LocationManager.GPS_PROVIDER, 300, 0, this);
     }
 
     public void stop() {
@@ -44,8 +45,12 @@ public class VehicleDetector implements LocationListener {
             currentlyInVehicle = false;
         }
 
-        if (listener != null && wasInVehicle != currentlyInVehicle) {
-            listener.onVehicleStateChanged(currentlyInVehicle, speedKmh);
+        if (listener != null) {
+            // Always send GPS data for motion calculation
+            listener.onGpsLocation(loc);
+            if (wasInVehicle != currentlyInVehicle) {
+                listener.onVehicleStateChanged(currentlyInVehicle, speedKmh);
+            }
         }
     }
 
