@@ -11,27 +11,28 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 
 /**
- * Downloads APK then triggers install intent via FileProvider.
- * Separate class to avoid d8 inner class issues.
+ * Downloads APK from a URL then triggers install intent.
+ * Follows redirects (GitHub uses them for asset downloads).
  */
 public class DownloadInstallThread extends Thread {
     private final Context context;
+    private final String downloadUrl;
 
-    public DownloadInstallThread(Context ctx) {
+    public DownloadInstallThread(Context ctx, String url) {
         this.context = ctx;
+        this.downloadUrl = url;
     }
 
     @Override
     public void run() {
         try {
-            // Download to app-private cache dir (no storage permission needed)
             File apkFile = new File(context.getExternalCacheDir(), "no-vomito-update.apk");
             if (apkFile.exists()) apkFile.delete();
 
-            URL url = new URL(UpdateChecker.SERVER_URL + "/api/download");
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(30000);
+            HttpURLConnection conn = (HttpURLConnection) new URL(downloadUrl).openConnection();
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(60000);
+            conn.setInstanceFollowRedirects(true);
 
             InputStream in = conn.getInputStream();
             FileOutputStream out = new FileOutputStream(apkFile);
@@ -44,7 +45,6 @@ public class DownloadInstallThread extends Thread {
             in.close();
             conn.disconnect();
 
-            // Launch install intent on main thread
             new Handler(Looper.getMainLooper()).post(new InstallRunner(context, apkFile));
 
         } catch (Exception e) {

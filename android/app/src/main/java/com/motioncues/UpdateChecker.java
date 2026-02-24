@@ -7,18 +7,24 @@ import android.os.Looper;
 import android.widget.Toast;
 
 /**
- * Push-based OTA updater using long-poll.
- * App connects to /api/wait-update — server holds connection
- * until a new build is pushed, then responds immediately.
+ * Update checker using GitHub Releases API.
+ * Checks periodically and on manual request.
  * NO inner classes — d8 bug workaround.
  */
 public class UpdateChecker implements Runnable {
-    static final String SERVER_URL = "http://192.168.1.153:7777";
+    static final String GITHUB_API =
+        "https://api.github.com/repos/patrick-oliveira-ch/no-vomito/releases/latest";
+
     private final Context context;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean running = false;
-    int localVersion = -1;
+    int localVersionCode = -1;
+    String localVersionName = "";
     volatile boolean updateAvailable = false;
+    volatile String downloadUrl = null;
+
+    // Check every 5 minutes
+    private static final long CHECK_INTERVAL = 5 * 60 * 1000;
 
     Context getContext() {
         return context;
@@ -29,16 +35,18 @@ public class UpdateChecker implements Runnable {
         try {
             PackageInfo pi = ctx.getPackageManager()
                 .getPackageInfo(ctx.getPackageName(), 0);
-            localVersion = (int) pi.getLongVersionCode();
+            localVersionCode = (int) pi.getLongVersionCode();
+            localVersionName = pi.versionName;
         } catch (Exception e) {
-            localVersion = 0;
+            localVersionCode = 0;
+            localVersionName = "0.0.0";
         }
     }
 
     public void startChecking() {
         running = true;
-        // Start long-poll connection in background
-        startLongPoll();
+        // First check after 30 seconds, then every 5 minutes
+        handler.postDelayed(this, 30000);
     }
 
     public void stopChecking() {
@@ -46,50 +54,40 @@ public class UpdateChecker implements Runnable {
         handler.removeCallbacks(this);
     }
 
-    /** Manual check — fetch /api/version and compare */
+    /** Manual check from button */
     public void checkNow() {
-        ManualCheckThread t = new ManualCheckThread(this);
+        GitHubCheckThread t = new GitHubCheckThread(this, true);
         t.setDaemon(true);
         t.start();
     }
 
-    private void startLongPoll() {
-        if (!running) return;
-        BackgroundChecker bg = new BackgroundChecker(this);
-        bg.setDaemon(true);
-        bg.start();
-    }
-
-    // Called from BackgroundChecker when server responds with update
-    void onUpdateFound() {
-        updateAvailable = true;
-        handler.post(this);
-    }
-
-    // Called from BackgroundChecker when connection times out or fails
-    void onConnectionEnded() {
-        if (running) {
-            // Reconnect after 2 seconds
-            handler.postDelayed(new ReconnectTask(this), 2000);
-        }
-    }
-
     @Override
     public void run() {
-        // Called on main thread to trigger download
-        if (updateAvailable) {
-            updateAvailable = false;
-            running = false;
-            doDownload();
-        }
+        // Periodic silent check
+        if (!running) return;
+        GitHubCheckThread t = new GitHubCheckThread(this, false);
+        t.setDaemon(true);
+        t.start();
+        // Schedule next check
+        handler.postDelayed(this, CHECK_INTERVAL);
     }
 
-    private void doDownload() {
+    // Called from GitHubCheckThread when update found
+    void onUpdateFound(String apkUrl) {
+        downloadUrl = apkUrl;
+        updateAvailable = true;
+        handler.post(new DownloadStarter(this));
+    }
+
+    void doDownload() {
+        if (!updateAvailable || downloadUrl == null) return;
+        updateAvailable = false;
+
         Toast.makeText(context,
             "Mise à jour dispo ! Téléchargement...",
             Toast.LENGTH_LONG).show();
 
-        DownloadInstallThread t = new DownloadInstallThread(context);
+        DownloadInstallThread t = new DownloadInstallThread(context, downloadUrl);
         t.setDaemon(true);
         t.start();
     }
